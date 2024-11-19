@@ -3,3 +3,5 @@ wget
 build-essential
 rustc
 cargo
+libxml2
+libxslt
