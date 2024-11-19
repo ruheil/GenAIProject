@@ -1,2 +1,5 @@
+curl
+wget
+build-essential
 rustc
 cargo
