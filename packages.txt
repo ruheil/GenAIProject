@@ -1,7 +1,4 @@
-curl
-wget
 build-essential
-rustc
-cargo
-libxml2
-libxslt
+curl
+pkg-config
+libssl-dev
