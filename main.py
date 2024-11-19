@@ -2,181 +2,321 @@ import streamlit as st
 from google.cloud import vision, speech
 import io
 import google.generativeai as genai
+from datetime import datetime
 
-# Initialize the Google GenAI model (GenAI)
+# Initialize GenAI
 genai.configure(api_key="AIzaSyDmEojgo55btim7U1XAad5aDcPiiXlJwh0")
 
-# Function to transcribe audio using Google Cloud Speech-to-Text
+# Context prompt for the chatbot - moved from system prompt to be included in user messages
+CONTEXT_PROMPT = """You are an intelligent lecture assistant that helps students understand and summarize lecture content. Your capabilities include:
+
+1. Summarizing lecture content from audio transcripts and image text
+2. Breaking down complex topics into easily digestible points
+3. Creating study notes with key concepts and definitions
+4. Answering questions about the lecture material
+5. Providing examples to illustrate concepts
+6. Highlighting important terms and their relationships
+7. Suggesting potential exam questions based on the content
+8. Helping students create study plans based on the material
+
+When summarizing lectures, focus on:
+- Main topics and key concepts
+- Important definitions and terminology
+- Relationships between different concepts
+- Real-world applications and examples
+- Supporting evidence and examples
+- Potential areas for further study
+
+Please maintain an educational and supportive tone, and feel free to ask clarifying questions if needed."""
+
+# Custom CSS for ChatGPT-like interface
+def apply_custom_css():
+    st.markdown("""
+        <style>
+        .chat-container {
+            padding: 1rem;
+            border-radius: 0.5rem;
+            margin-bottom: 1rem;
+        }
+        
+        .user-message {
+            background-color: #1a73e8;
+            color: white;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            margin: 1rem 2rem 1rem 4rem;
+        }
+        
+        .bot-message {
+            background-color: #f8f9fa;
+            color: #000000;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            margin: 1rem 4rem 1rem 2rem;
+            border: 1px solid #e0e0e0;
+        }
+        
+        .stButton>button {
+            width: 100%;
+            border-radius: 0.5rem;
+            margin-bottom: 0.5rem;
+        }
+        
+        .stTextInput>div>div>input {
+            border-radius: 1.5rem;
+        }
+        
+        #MainMenu {visibility: hidden;}
+        footer {visibility: hidden;}
+        </style>
+    """, unsafe_allow_html=True)
+
+
+# Initialize session state
+def init_session_state():
+    if 'messages' not in st.session_state:
+        st.session_state.messages = []
+    if 'audio_transcript' not in st.session_state:
+        st.session_state.audio_transcript = ""
+    if 'document_text' not in st.session_state:
+        st.session_state.document_text = ""
+    if 'processing' not in st.session_state:
+        st.session_state.processing = False
+    if 'user_input' not in st.session_state:
+        st.session_state.user_input = ""
+
+# Audio transcription function
 def transcribe_audio(audio_file):
     client = speech.SpeechClient()
-
-    # Read the audio file uploaded by the user
     content = audio_file.read()
-
-    # Configure audio and recognition settings
+    
     audio = speech.RecognitionAudio(content=content)
     config = speech.RecognitionConfig(
         encoding=speech.RecognitionConfig.AudioEncoding.MP3,
         sample_rate_hertz=16000,
         language_code="en-US",
+        enable_automatic_punctuation=True,
     )
-
-    # Perform the transcription request
-    response = client.recognize(config=config, audio=audio)
-
-    # Extract and return the transcribed text
-    transcript = ""
-    for result in response.results:
-        transcript += result.alternatives[0].transcript
-
+    
+    with st.spinner("Transcribing audio..."):
+        response = client.recognize(config=config, audio=audio)
+        
+    transcript = " ".join(result.alternatives[0].transcript for result in response.results)
     return transcript
 
-# Function to detect document text using Google Cloud Vision API
+# Document text detection function
 def detect_document(image_file):
     client = vision.ImageAnnotatorClient()
-
     content = image_file.read()
-
     image = vision.Image(content=content)
-
-    response = client.document_text_detection(image=image)
-
-    extracted_text = ""
-    for page in response.full_text_annotation.pages:
-        for block in page.blocks:
-            for paragraph in block.paragraphs:
-                for word in paragraph.words:
-                    word_text = "".join([symbol.text for symbol in word.symbols])
-                    extracted_text += word_text + " "
-
+    
+    with st.spinner("Extracting text from image..."):
+        response = client.document_text_detection(image=image)
+    
     if response.error.message:
-        raise Exception(
-            "{}\nFor more info on error messages, check: "
-            "https://cloud.google.com/apis/design/errors".format(response.error.message)
-        )
+        raise Exception(response.error.message)
+    
+    return response.full_text_annotation.text
 
-    return extracted_text
-
-# Function to engage in a conversation with the chatbot
-def chatbot_response(conversation_history, task_description, user_input):
-    # Initialize the Google GenAI model
+# Modified chatbot response function to work with Gemini's format
+def get_chatbot_response(conversation_history, user_input):
     model = genai.GenerativeModel("gemini-1.5-flash")
+    
+    # Initialize chat with just the context prompt
+    chat = model.start_chat(history=[])
+    
+    # Add context about available lecture materials
+    context = CONTEXT_PROMPT + "\n\n"
+    if st.session_state.audio_transcript or st.session_state.document_text:
+        context += "Available lecture materials:\n"
+        if st.session_state.audio_transcript:
+            context += f"- Audio transcript: {st.session_state.audio_transcript}\n"
+        if st.session_state.document_text:
+            context += f"- Document text: {st.session_state.document_text}\n"
+    
+    # Add conversation history as alternating user/model messages
+    for msg in conversation_history:
+        chat.send_message(msg["content"])
+    
+    # Enhance user input with context
+    enhanced_input = f"""{context}
 
-    # Prepare the chat with the task description and user input
-    chat = model.start_chat(
-        history=[
-            {"role": "user", "parts": task_description},
-            {"role": "model", "parts": "Sure, I will generate important notes from the provided materials."},
-        ]
+Based on the lecture materials provided, please address the following: {user_input}
+
+Remember to:
+1. Reference specific parts of the lecture when relevant
+2. Provide clear explanations with examples
+3. Highlight key terms and concepts
+4. Make connections between different parts of the material
+5. Suggest related topics for further study if appropriate"""
+    
+    # Get response
+    response = chat.send_message(enhanced_input)
+    return response.text
+
+def process_initial_summary(audio_transcript="", document_text=""):
+    """Generate initial summary with enhanced context"""
+    summary_prompt = f"""{CONTEXT_PROMPT}
+
+Please provide a comprehensive summary of the following lecture materials:
+
+Audio Transcript:
+{audio_transcript}
+
+Document Text:
+{document_text}
+
+Please structure the summary as follows:
+1. Main Topics Covered
+2. Key Concepts and Definitions
+3. Important Relationships and Connections
+4. Real-world Applications
+5. Key Takeaways
+6. Suggested Study Points
+
+Focus on creating a clear, organized summary that will help students understand and review the material effectively."""
+
+    return get_chatbot_response([], summary_prompt)
+
+# Handle message submission
+def handle_submit():
+    if st.session_state.user_input.strip():
+        # Add user message
+        st.session_state.messages.append({
+            "content": st.session_state.user_input,
+            "is_user": True,
+            "timestamp": datetime.now().strftime("%H:%M")
+        })
+        
+        try:
+            # Get bot response
+            bot_response = get_chatbot_response(
+                st.session_state.messages, 
+                st.session_state.user_input
+            )
+            
+            # Add bot response
+            st.session_state.messages.append({
+                "content": bot_response,
+                "is_user": False,
+                "timestamp": datetime.now().strftime("%H:%M")
+            })
+        
+        except Exception as e:
+            st.error(f"Error generating response: {str(e)}")
+        
+        # Clear input
+        st.session_state.user_input = ""
+
+# Display chat messages
+def display_chat_messages():
+    for message in st.session_state.messages:
+        if message["is_user"]:
+            st.markdown(f'<div class="user-message">{message["content"]}</div>', 
+                       unsafe_allow_html=True)
+        else:
+            st.markdown(f'<div class="bot-message">{message["content"]}</div>', 
+                       unsafe_allow_html=True)
+
+# Main app function
+def main():
+    # Apply custom CSS
+    apply_custom_css()
+    
+    # Initialize session state
+    init_session_state()
+    
+    # App header
+    st.title("📚 Lecture Notes Generator")
+
+    # Add introduction
+    if not st.session_state.messages:
+        st.markdown("""
+        Welcome to the Lecture Notes Generator! 👋
+        
+        I'm your AI lecture assistant, ready to help you:
+        - 📝 Summarize lecture content
+        - 🔍 Extract key concepts
+        - ❓ Answer questions about the material
+        - 📚 Create study notes
+        - 🎯 Identify important topics
+        
+        To get started:
+        1. Upload your lecture audio and/or images
+        2. Click "Process Uploads" to analyze the content
+        3. Ask questions about the lecture material
+        """)
+    
+    # Sidebar for file uploads
+    with st.sidebar:
+        st.header("Upload Files")
+        
+        # Audio upload
+        audio_file = st.file_uploader("Upload Lecture Audio (MP3)", 
+                                    type=["mp3"],
+                                    key="audio_upload")
+        
+        # Image upload
+        image_file = st.file_uploader("Upload Lecture Notes Image", 
+                                    type=["jpg", "jpeg", "png"],
+                                    key="image_upload")
+        
+        # Process uploads button
+        if st.button("Process Uploads"):
+            st.session_state.processing = True
+            
+            try:
+                # Process audio if uploaded
+                if audio_file:
+                    st.session_state.audio_transcript = transcribe_audio(audio_file)
+                    st.session_state.messages.append({
+                        "content": "Audio transcription completed!",
+                        "is_user": False,
+                        "timestamp": datetime.now().strftime("%H:%M")
+                    })
+                
+                # Process image if uploaded
+                if image_file:
+                    st.session_state.document_text = detect_document(image_file)
+                    st.session_state.messages.append({
+                        "content": "Image text extraction completed!",
+                        "is_user": False,
+                        "timestamp": datetime.now().strftime("%H:%M")
+                    })
+                
+                # Generate initial summary
+                if st.session_state.audio_transcript or st.session_state.document_text:
+                    combined_text = (f"Audio transcript: {st.session_state.audio_transcript}\n"
+                                   f"Image text: {st.session_state.document_text}")
+                    
+                    initial_summary = get_chatbot_response([], 
+                        f"Please summarize this lecture material: {combined_text}")
+                    
+                    st.session_state.messages.append({
+                        "content": initial_summary,
+                        "is_user": False,
+                        "timestamp": datetime.now().strftime("%H:%M")
+                    })
+            
+            except Exception as e:
+                st.error(f"Error processing files: {str(e)}")
+            
+            finally:
+                st.session_state.processing = False
+    
+    # Main chat interface
+    chat_container = st.container()
+    
+    # Display chat messages
+    with chat_container:
+        display_chat_messages()
+    
+    # Chat input
+    st.text_input(
+        "Ask a question about the lecture",
+        key="user_input",
+        on_change=handle_submit
     )
 
-    # Combine conversation history into the chat
-    for history in conversation_history:
-        chat.send_message(history['user_input'])  # Add user inputs to the chat history
-
-    # Send the combined text (audio + image transcription) to the chatbot for initial processing
-    initial_response = chat.send_message(user_input)
-
-    # Extract initial response text
-    initial_notes = initial_response.text
-
-    # Now send the new user input (subsequent conversation)
-    subsequent_response = chat.send_message(user_input)
-
-    # Return both the initial notes and subsequent response
-    return initial_notes, subsequent_response.text
-
-# Streamlit UI
-st.title("Lecture Notes Generator from Audio and Images")
-
-st.write("Upload an audio file (MP3) or an image to help generate lecture notes.")
-
-# File uploader for audio (MP3)
-audio_file = st.file_uploader("Upload an MP3 audio file", type=["mp3"])
-audio_transcript = ""
-
-# File uploader for image (e.g., handwritten note)
-image_file = st.file_uploader("Upload an image file (e.g., handwritten note)", type=["jpg", "png", "jpeg"])
-document_text = ""
-
-progress_placeholder = st.empty()
-progress_placeholder_2 = st.empty()
-
-# Task description for the chatbot
-task_description = (
-    "Your task is to summarize lectures to lecture notes. You are provided with both images and audios of lectures, "
-    "and your purpose is to help users understand and generate the important notes for them."
-)
-
-# Button to start the summarization process
-if st.button("Generate Summarization"):
-
-    # Check if neither audio nor image is uploaded
-    if not audio_file and not image_file:
-        st.error("Please upload at least one audio file (MP3) or an image file to generate summarization.")
-    else:
-        # Only perform transcription if audio is uploaded
-        if audio_file:
-            progress_placeholder.text("Transcribing audio...")
-            try:
-                audio_transcript = transcribe_audio(audio_file)
-                progress_placeholder.empty()
-                st.subheader("Audio Transcribed Successfully!")
-            except Exception as e:
-                st.error(f"Error during audio transcription: {e}")
-
-        # Only perform text extraction if image is uploaded
-        if image_file:
-            progress_placeholder_2.text("Extracting text from the image...")
-            try:
-                document_text = detect_document(image_file)
-                progress_placeholder_2.empty()
-                st.subheader("Text Extracted From Image(s) Successfully!")
-            except Exception as e:
-                st.error(f"Error during document text detection: {e}")
-
-        # If either transcript or document text is available, the chatbot can start processing
-        if audio_transcript or document_text:
-            combined_text = "Transcripted audio: {" + audio_transcript + "}, Text extracted from images: {" + document_text + "}"
-            st.write("Now the AI will summarize the lecture materials.")
-
-            # Conversation history list
-            if 'history' not in st.session_state:
-                st.session_state['history'] = []
-
-            # Save audio and image text in conversation history
-            st.session_state['history'].append({
-                'user_input': combined_text
-            })
-
-            # Generate initial summary from the uploaded files
-            initial_notes, bot_response = chatbot_response(st.session_state['history'], task_description, combined_text)
-
-            # Display the generated initial notes
-            st.subheader("Generated Lecture Notes")
-            st.write(initial_notes)
-
-            # Display the response from the chatbot
-            st.write("AI: ", bot_response)
-
-# Only show the chat history after the summarization button is clicked
-if 'history' in st.session_state and st.session_state['history']:
-    # User input for chatbot
-    user_input = st.text_input("Continue the conversation or ask something about the uploaded files")
-
-    if user_input:
-        # Generate chatbot response based on the ongoing conversation
-        subsequent_notes, bot_response = chatbot_response(st.session_state['history'], task_description, user_input)
-
-        # Add the user input and bot response to the conversation history
-        st.session_state['history'].append({
-            'user': 'User',
-            'user_input': user_input,
-            'bot': 'Bot',
-            'bot_response': bot_response
-        })
-
-        # Display the updated conversation history
-        for chat in st.session_state['history']:
-            if 'bot_response' in chat:
-                st.write(f"**Bot**: {chat['bot_response']}")
+if __name__ == "__main__":
+    main()
