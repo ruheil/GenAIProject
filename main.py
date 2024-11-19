@@ -5,7 +5,7 @@ import google.generativeai as genai
 from datetime import datetime
 
 # Initialize GenAI
-genai.configure(api_key="AIzaSyDmEojgo55btim7U1XAad5aDcPiiXlJwh0")
+genai.configure(api_key=st.secrets["API_KEY"])
 
 # Context prompt for the chatbot - moved from system prompt to be included in user messages
 CONTEXT_PROMPT = """You are an intelligent lecture assistant that helps students understand and summarize lecture content. Your capabilities include:
